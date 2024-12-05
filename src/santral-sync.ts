@@ -2,7 +2,6 @@ import CallApiClient from "./call-api";
 import { HubspotApiClient } from "./hubspot-api";
 import { config } from "./config";
 
-// Interface tanımlamaları
 interface CallRecord {
   call_uuid: string;
   caller_id_number: string;
@@ -29,23 +28,14 @@ interface ApiResponse {
   error?: string;
 }
 
-interface HubspotContact {
-  id: string;
-  properties: {
-    phone?: string;
-    mobilephone?: string;
-    firstname?: string;
-    lastname?: string;
-    company?: string;
-  };
-}
-
 interface SyncStats {
   total: number;
   processed: number;
   success: number;
   failed: number;
   skipped: number;
+  contactMatched: number;
+  companyMatched: number;
   errors: Array<{
     callUuid: string;
     number: string;
@@ -54,23 +44,23 @@ interface SyncStats {
   }>;
 }
 
-class SantralHubspotSync {
+export class SantralHubspotSync {
   private callApi: CallApiClient;
   private hubspotApi: HubspotApiClient;
   private stats: SyncStats = {
-    // stats'i initialize ediyoruz
     total: 0,
     processed: 0,
     success: 0,
     failed: 0,
     skipped: 0,
+    contactMatched: 0,
+    companyMatched: 0,
     errors: [],
   };
 
   constructor() {
     this.callApi = new CallApiClient(config.santralApiKey);
     this.hubspotApi = new HubspotApiClient(config.hubspotAccessToken);
-    this.resetStats();
   }
 
   private resetStats() {
@@ -80,6 +70,8 @@ class SantralHubspotSync {
       success: 0,
       failed: 0,
       skipped: 0,
+      contactMatched: 0,
+      companyMatched: 0,
       errors: [],
     };
   }
@@ -90,10 +82,14 @@ class SantralHubspotSync {
 
   async syncCalls(startDate?: Date, endDate?: Date) {
     try {
+      this.resetStats();
+
+      // Default son 24 saat
       const defaultStartDate = new Date();
       defaultStartDate.setHours(defaultStartDate.getHours() - 24);
 
-      const callsResponse: ApiResponse = await this.callApi.getCallRecords({
+      // Santral API'den çağrıları al
+      const callsResponse = await this.callApi.getCallRecords({
         start_stamp_from: startDate || defaultStartDate,
         start_stamp_to: endDate || new Date(),
         limit: 100,
@@ -106,6 +102,7 @@ class SantralHubspotSync {
       this.stats.total = callsResponse.data.cdrs.length;
       console.log(`${this.stats.total} çağrı bulundu.`);
 
+      // Her çağrı için işlem yap
       for (const call of callsResponse.data.cdrs) {
         try {
           this.stats.processed++;
@@ -114,58 +111,65 @@ class SantralHubspotSync {
             `\nİşleniyor: ${destinationNumber} [${this.stats.processed}/${this.stats.total}]`
           );
 
-          const contact = await this.hubspotApi.findContactByPhone(
-            destinationNumber
-          );
+          // Çağrıyı işle ve sonucu al
+          const result = await this.processCall(call);
 
-          if (!contact) {
-            console.log(`❌ ${destinationNumber} için contact bulunamadı`);
-            this.stats.skipped++;
-            continue;
+          if (result.success) {
+            this.stats.success++;
+            if (result.contactMatched) this.stats.contactMatched++;
+            if (result.companyMatched) this.stats.companyMatched++;
           }
-
-          const existingCall = await this.hubspotApi.findCallByUUID(
-            call.call_uuid
-          );
-          if (existingCall) {
-            console.log(`ℹ️ Bu çağrı zaten kaydedilmiş`);
-            this.stats.skipped++;
-            continue;
-          }
-
-          await this.processCall(call, contact);
-          this.stats.success++;
         } catch (error) {
           this.handleCallProcessError(call, error);
         }
       }
 
-      // Senkronizasyon özeti
+      // Özet raporu yazdır
       this.printSyncSummary();
+
+      return { stats: this.stats };
     } catch (error) {
       console.error("Senkronizasyon hatası:", error);
       throw error;
     }
   }
 
-  private async processCall(call: CallRecord, contact?: HubspotContact) {
-    const [hours, minutes, seconds] = call.duration.split(":").map(Number);
-    const durationInSeconds = hours * 3600 + minutes * 60 + seconds;
+  private async processCall(call: CallRecord): Promise<{
+    success: boolean;
+    contactMatched?: boolean;
+    companyMatched?: boolean;
+  }> {
+    const destinationNumber = call.destination_number.split(" ")[0];
 
+    // Önce contact'ı bul
+    const contact = await this.hubspotApi.findContactByPhone(destinationNumber);
+
+    if (!contact) {
+      console.log(`❌ ${destinationNumber} için contact bulunamadı`);
+      this.stats.skipped++;
+      return { success: true };
+    }
+
+    // Var olan çağrıyı kontrol et
+    const existingCall = await this.hubspotApi.findCallByUUID(call.call_uuid);
+    if (existingCall) {
+      console.log(`ℹ️ Bu çağrı zaten kaydedilmiş`);
+      this.stats.skipped++;
+      return { success: true };
+    }
+
+    // Çağrı notunu hazırla
     const callNote = this.generateCallNote(call);
 
+    // Çağrıyı Hubspot'a kaydet
     const result = await this.hubspotApi.createCallEngagement({
-      // contactId'yi varsa gönder
-      ...(contact && { contactId: contact.id }),
+      contactId: contact.id,
       fromNumber: call.caller_id_number.split(" ")[0],
-      toNumber: call.destination_number.split(" ")[0],
-      callDuration: durationInSeconds,
-      recordingUrl:
-        call.recording_present === "true"
-          ? `https://api.bulutsantralim.com/recording/${call.call_uuid}`
-          : "",
+      toNumber: destinationNumber,
+      callDuration: this.calculateDuration(call.duration),
+      recordingUrl: this.getRecordingUrl(call),
       callStatus: call.result,
-      callTimestamp: new Date(call.start_stamp).getTime(),
+      callTimestamp: this.getTimestamp(call.start_stamp),
       callUuid: call.call_uuid,
       notes: callNote,
     });
@@ -173,14 +177,18 @@ class SantralHubspotSync {
     if (result.success) {
       console.log(`✓ Çağrı kaydı oluşturuldu (ID: ${result.callId})`);
       if (result.contactId) {
-        console.log(`✓ Contact ile ilişkilendirildi (ID: ${result.contactId})`);
-        if (result.companyId) {
-          console.log(`✓ Company ile ilişkilendirildi (${result.companyName})`);
-        }
+        console.log(`✓ Contact ile ilişkilendirildi: ${result.contactName}`);
       }
-    } else {
-      throw new Error(`Çağrı kaydı oluşturulamadı: ${result.reason}`);
+      if (result.companyId) {
+        console.log(`✓ Company ile ilişkilendirildi: ${result.companyName}`);
+      }
     }
+
+    return {
+      success: result.success,
+      contactMatched: !!result.contactId,
+      companyMatched: !!result.companyId,
+    };
   }
 
   private generateCallNote(call: CallRecord): string {
@@ -197,6 +205,21 @@ DETAYLAR
 ${
   call.recording_present === "true" ? "• Ses Kaydı Mevcut" : "• Ses Kaydı Yok"
 }`;
+  }
+
+  private calculateDuration(duration: string): number {
+    const [hours, minutes, seconds] = duration.split(":").map(Number);
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  private getRecordingUrl(call: CallRecord): string {
+    return call.recording_present === "true"
+      ? `https://api.bulutsantralim.com/recording/${call.call_uuid}`
+      : "";
+  }
+
+  private getTimestamp(dateString: string): number {
+    return new Date(dateString).getTime();
   }
 
   private handleCallProcessError(call: CallRecord, error: any) {
@@ -218,6 +241,8 @@ ${
     console.log(`Toplam Çağrı: ${this.stats.total}`);
     console.log(`İşlenen: ${this.stats.processed}`);
     console.log(`Başarılı: ${this.stats.success}`);
+    console.log(`Contact Eşleşen: ${this.stats.contactMatched}`);
+    console.log(`Company Eşleşen: ${this.stats.companyMatched}`);
     console.log(`Başarısız: ${this.stats.failed}`);
     console.log(`Atlanan: ${this.stats.skipped}`);
 
@@ -231,6 +256,17 @@ ${
         console.log(`Zaman: ${error.timestamp}`);
       });
     }
+
+    // Başarı oranı
+    const successRate = ((this.stats.success / this.stats.total) * 100).toFixed(
+      2
+    );
+    const matchRate = (
+      (this.stats.contactMatched / this.stats.total) *
+      100
+    ).toFixed(2);
+    console.log(`\nBaşarı Oranı: ${successRate}%`);
+    console.log(`Eşleşme Oranı: ${matchRate}%`);
   }
 }
 

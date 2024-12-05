@@ -1,5 +1,8 @@
+// src/hubspot-api.ts
+
 import axios from "axios";
 import { config } from "./config";
+import { PhoneUtils } from "./utils/phone-utils";
 
 interface HubspotContact {
   id: string;
@@ -9,6 +12,13 @@ interface HubspotContact {
     firstname?: string;
     lastname?: string;
     company?: string;
+  };
+  associations?: {
+    companies?: {
+      results: Array<{
+        id: string;
+      }>;
+    };
   };
 }
 
@@ -32,7 +42,6 @@ export class HubspotApiClient {
     this.accessToken = accessToken;
   }
 
-  // Hata loglama metodu
   private logError(method: string, error: any, params?: any) {
     const errorLog: ErrorLog = {
       timestamp: new Date().toISOString(),
@@ -48,12 +57,10 @@ export class HubspotApiClient {
     console.error(`[${errorLog.timestamp}] ${method} Error:`, errorLog);
   }
 
-  // Hata loglarını alma metodu
   getErrorLogs(): ErrorLog[] {
     return this.errorLogs;
   }
 
-  // Hata loglarını temizleme
   clearErrorLogs() {
     this.errorLogs = [];
   }
@@ -62,19 +69,22 @@ export class HubspotApiClient {
     phoneNumber: string
   ): Promise<HubspotContact | null> {
     try {
-      const phoneFormats = [
-        phoneNumber,
-        phoneNumber.replace(/\s/g, ""),
-        phoneNumber.replace(/[^\d]/g, ""),
-        phoneNumber.replace(/^\+/, ""),
-        phoneNumber.replace(/^0/, ""),
-        phoneNumber.replace(/^\+90/, ""),
-        phoneNumber.replace(/^90/, ""),
+      const formattedNumber = PhoneUtils.formatInternationalNumber(phoneNumber);
+      if (!formattedNumber) {
+        console.log(`❌ Geçersiz telefon numarası formatı: ${phoneNumber}`);
+        return null;
+      }
+
+      const numberVariants = [
+        formattedNumber, // +905321234567
+        formattedNumber.replace(/^\+/, ""), // 905321234567
+        formattedNumber.slice(3), // 5321234567
+        "0" + formattedNumber.slice(3), // 05321234567
       ].filter(Boolean);
 
-      console.log("Denenen telefon formatları:", phoneFormats);
+      console.log("Denenen telefon formatları:", numberVariants);
 
-      for (const format of phoneFormats) {
+      for (const format of numberVariants) {
         console.log(`${format} formatı deneniyor...`);
 
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -102,7 +112,13 @@ export class HubspotApiClient {
                 ],
               },
             ],
-            properties: ["phone", "mobilephone", "firstname", "lastname"],
+            properties: [
+              "phone",
+              "mobilephone",
+              "firstname",
+              "lastname",
+              "company",
+            ],
             limit: 1,
           },
           {
@@ -146,7 +162,7 @@ export class HubspotApiClient {
               filters: [
                 {
                   propertyName: "hs_call_body",
-                  operator: "CONTAINS_TOKEN", // CONTAINS yerine CONTAINS_TOKEN kullanıyoruz
+                  operator: "CONTAINS_TOKEN",
                   value: callUuid,
                 },
               ],
@@ -169,8 +185,24 @@ export class HubspotApiClient {
     }
   }
 
+  private mapCallStatus(santralStatus: string): string {
+    const statusMap: { [key: string]: string } = {
+      Vazgeçildi: "CANCELED",
+      Başarılı: "COMPLETED",
+      Meşgul: "BUSY",
+      Cevapsız: "NO_ANSWER",
+      Reddedildi: "FAILED",
+      Başarısız: "FAILED",
+      Kuyrukta: "QUEUED",
+      Çalıyor: "RINGING",
+      Beklemede: "HOLD",
+    };
+
+    return statusMap[santralStatus] || "COMPLETED";
+  }
+
   async createCallEngagement(params: {
-    contactId?: string; // Artık opsiyonel
+    contactId?: string;
     fromNumber: string;
     toNumber: string;
     callDuration: number;
@@ -181,33 +213,41 @@ export class HubspotApiClient {
     notes?: string;
   }) {
     try {
-      // Önce çağrının daha önce kaydedilip kaydedilmediğini kontrol et
+      // Çağrı kontrolü
       const existingCall = await this.findCallByUUID(params.callUuid);
       if (existingCall) {
         console.log(`Bu çağrı zaten kaydedilmiş (UUID: ${params.callUuid})`);
         return { success: false, reason: "duplicate" };
       }
 
-      // Eğer contactId verilmediyse, toNumber'a göre contact'ı bulmaya çalış
-      let contactId = params.contactId;
-      if (!contactId) {
-        const contact = await this.findContactByPhone(params.toNumber);
+      // Contact bilgilerini al
+      let contact = null;
+      let companyInfo = null;
+
+      if (params.contactId) {
+        contact = await this.getContactWithAssociations(params.contactId);
+      } else {
+        contact = await this.findContactByPhone(params.toNumber);
         if (contact) {
-          contactId = contact.id;
-          console.log(
-            `✓ Contact bulundu: ${contact.properties.firstname} ${contact.properties.lastname}`
-          );
+          params.contactId = contact.id;
         }
       }
 
-      // Contact varsa detaylarını al
-      let contact = null;
-      let companyInfo = null;
-      if (contactId) {
-        contact = await this.getContactWithAssociations(contactId);
-        if (contact) {
-          companyInfo = await this.getAssociatedCompanyInfo(contact);
-        }
+      // Company bilgisini al
+      if (contact?.associations?.companies?.results?.length > 0) {
+        const companyId = contact.associations.companies.results[0].id;
+        const companyResponse = await axios.get(
+          `${this.baseUrl}/crm/v3/objects/companies/${companyId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${this.accessToken}`,
+            },
+          }
+        );
+        companyInfo = {
+          companyId,
+          companyName: companyResponse.data.properties.name,
+        };
       }
 
       const contactName = contact
@@ -216,16 +256,23 @@ export class HubspotApiClient {
           }`.trim()
         : params.toNumber;
 
-      // Çağrı kaydını oluştur
+      const formattedFromNumber =
+        PhoneUtils.formatInternationalNumber(params.fromNumber) ||
+        params.fromNumber;
+      const formattedToNumber =
+        PhoneUtils.formatInternationalNumber(params.toNumber) ||
+        params.toNumber;
+
+      // Call kaydını oluştur
       const callData = {
         properties: {
           hs_call_direction: "INBOUND",
           hs_call_duration: params.callDuration,
-          hs_call_from_number: params.fromNumber,
+          hs_call_from_number: formattedFromNumber,
           hs_call_recording_url: params.recordingUrl,
-          hs_call_status: "COMPLETED",
+          hs_call_status: this.mapCallStatus(params.callStatus),
           hs_call_title: `Call with ${contactName} - Santral`,
-          hs_call_to_number: params.toNumber,
+          hs_call_to_number: formattedToNumber,
           hs_timestamp: params.callTimestamp,
           hs_call_body:
             params.notes ||
@@ -233,10 +280,13 @@ export class HubspotApiClient {
               ...params,
               contactName,
               companyName: companyInfo?.companyName,
+              fromNumber: formattedFromNumber,
+              toNumber: formattedToNumber,
             }),
         },
       };
 
+      // Çağrı kaydını oluştur
       const callResponse = await axios.post(
         `${this.baseUrl}/crm/v3/objects/calls`,
         callData,
@@ -251,19 +301,23 @@ export class HubspotApiClient {
       const callId = callResponse.data.id;
       console.log("✓ Çağrı kaydı oluşturuldu:", callId);
 
-      // Contact varsa ilişkilendirmeleri yap
-      if (contactId) {
-        await this.createAssociations(
-          callId,
-          contactId,
-          companyInfo?.companyId
+      // İlişkilendirmeleri yap
+      if (contact) {
+        await this.associateCall(callId, contact.id);
+        console.log(`✓ Contact ile ilişkilendirildi: ${contactName}`);
+      }
+
+      if (companyInfo) {
+        await this.associateCallWithCompany(callId, companyInfo.companyId);
+        console.log(
+          `✓ Company ile ilişkilendirildi: ${companyInfo.companyName}`
         );
       }
 
       return {
         success: true,
         callId,
-        contactId,
+        contactId: contact?.id,
         contactName,
         companyId: companyInfo?.companyId,
         companyName: companyInfo?.companyName,
@@ -295,71 +349,31 @@ export class HubspotApiClient {
     }
   }
 
-  private async getAssociatedCompanyInfo(contact: any) {
-    if (!contact.associations?.companies?.results?.length) {
-      return null;
-    }
-
-    try {
-      const companyId = contact.associations.companies.results[0].id;
-      const response = await axios.get(
-        `${this.baseUrl}/crm/v3/objects/companies/${companyId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-          },
-        }
-      );
-
-      return {
-        companyId,
-        companyName: response.data.properties.name,
-      };
-    } catch (error) {
-      this.logError("getAssociatedCompanyInfo", error, {
-        contactId: contact.id,
-      });
-      return null;
-    }
-  }
-
-  private async prepareCallData(params: any) {
-    const contactName = `${params.contact.properties.firstname || ""} ${
-      params.contact.properties.lastname || ""
-    }`.trim();
-
-    return {
-      properties: {
-        hs_call_direction: "INBOUND",
-        hs_call_duration: params.callDuration,
-        hs_call_from_number: params.fromNumber,
-        hs_call_recording_url: params.recordingUrl,
-        hs_call_status: "COMPLETED",
-        hs_call_title: `Call with ${contactName} - Santral`,
-        hs_call_to_number: params.toNumber,
-        hs_timestamp: params.callTimestamp,
-        hs_call_body:
-          params.notes ||
-          this.generateCallNote({
-            ...params,
-            contactName,
-            companyName: params.companyInfo?.companyName,
-          }),
-      },
-    };
-  }
-
   private generateCallNote(params: any): string {
-    return `Santral Çağrı Detayları\n
-Arayan: ${params.fromNumber}
-Aranan: ${params.contactName}${
+    const fromNumber = PhoneUtils.formatPhoneNumberForDisplay(
+      params.fromNumber
+    );
+    const toNumber = PhoneUtils.formatPhoneNumberForDisplay(params.toNumber);
+
+    return `Santral Çağrı Detayları
+
+DETAYLAR
+--------
+• UUID: ${params.callUuid}
+• Arayan: ${fromNumber}
+• Aranan: ${params.contactName}${
       params.companyName ? ` (${params.companyName})` : ""
     }
-UUID: ${params.callUuid}
-Süre: ${Math.floor(params.callDuration / 60)} dakika ${
+• Alıcı No: ${toNumber}
+• Başlangıç: ${new Date(params.callTimestamp).toLocaleString()}
+• Süre: ${Math.floor(params.callDuration / 60)} dakika ${
       params.callDuration % 60
     } saniye
-${params.recordingUrl ? `\nSes Kaydı: ${params.recordingUrl}` : ""}`;
+${
+  params.recordingUrl
+    ? `• Ses Kaydı: ${params.recordingUrl}`
+    : "• Ses Kaydı Yok"
+}`;
   }
 
   async updateCallNotes(callUuid: string, notes: string): Promise<boolean> {
@@ -372,7 +386,7 @@ ${params.recordingUrl ? `\nSes Kaydı: ${params.recordingUrl}` : ""}`;
               filters: [
                 {
                   propertyName: "hs_call_body",
-                  operator: "CONTAINS_TOKEN", // Burayı da güncelliyoruz
+                  operator: "CONTAINS_TOKEN",
                   value: callUuid,
                 },
               ],
@@ -416,48 +430,17 @@ ${params.recordingUrl ? `\nSes Kaydı: ${params.recordingUrl}` : ""}`;
     }
   }
 
-  private async createAssociations(
-    callId: string,
-    contactId: string,
-    companyId?: string
-  ) {
-    try {
-      // Contact ilişkilendirmesi
-      await this.associateCall(callId, contactId);
-
-      // Company ilişkilendirmesi (eğer varsa)
-      if (companyId) {
-        await this.associateCallWithCompany(callId, companyId);
-      }
-    } catch (error) {
-      this.logError("createAssociations", error, {
-        callId,
-        contactId,
-        companyId,
-      });
-      // İlişkilendirme hatası kritik değil, devam et
-      console.error("İlişkilendirme işlemi başarısız:", error);
-    }
-  }
-
   private async associateCall(callId: string, contactId: string) {
     try {
       const data = {
-        to: [
-          {
-            id: contactId,
-            associationTypes: [
-              {
-                associationCategory: "USER_DEFINED",
-                associationTypeId: 1,
-              },
-            ],
-          },
-        ],
+        associationSpec: {
+          associationCategory: "HUBSPOT_DEFINED",
+          associationTypeId: 194, // Call to Contact association type
+        },
       };
 
       await axios.put(
-        `${this.baseUrl}/crm/v4/objects/calls/${callId}/associations/contacts`,
+        `${this.baseUrl}/crm/v3/objects/calls/${callId}/associations/contacts/${contactId}`,
         data,
         {
           headers: {
@@ -469,7 +452,6 @@ ${params.recordingUrl ? `\nSes Kaydı: ${params.recordingUrl}` : ""}`;
       console.log("✓ Call-Contact ilişkisi kuruldu");
     } catch (error) {
       this.logError("associateCall", error, { callId, contactId });
-      console.warn("İlişkilendirme hatası:", error);
       throw error;
     }
   }
@@ -477,21 +459,14 @@ ${params.recordingUrl ? `\nSes Kaydı: ${params.recordingUrl}` : ""}`;
   private async associateCallWithCompany(callId: string, companyId: string) {
     try {
       const data = {
-        to: [
-          {
-            id: companyId,
-            associationTypes: [
-              {
-                associationCategory: "USER_DEFINED",
-                associationTypeId: 1,
-              },
-            ],
-          },
-        ],
+        associationSpec: {
+          associationCategory: "HUBSPOT_DEFINED",
+          associationTypeId: 220, // Call to Company association type
+        },
       };
 
       await axios.put(
-        `${this.baseUrl}/crm/v4/objects/calls/${callId}/associations/companies`,
+        `${this.baseUrl}/crm/v3/objects/calls/${callId}/associations/companies/${companyId}`,
         data,
         {
           headers: {

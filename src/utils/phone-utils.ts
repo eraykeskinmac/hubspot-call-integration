@@ -1,3 +1,5 @@
+// src/utils/phone-utils.ts
+
 import { parsePhoneNumber, CountryCode } from "libphonenumber-js";
 
 export class PhoneUtils {
@@ -5,6 +7,9 @@ export class PhoneUtils {
     try {
       // Numarayı temizle
       let cleanNumber = phoneNumber.replace(/[\s\(\)\-]/g, "");
+
+      // URL encoded içeriği decode et
+      cleanNumber = decodeURIComponent(cleanNumber);
 
       // + ile başlıyorsa direkt parse et
       if (cleanNumber.startsWith("+")) {
@@ -14,73 +19,49 @@ export class PhoneUtils {
         }
       }
 
-      // Yaygın ülke kodları listesi
-      const commonCountryCodes = [
-        "TR",
-        "US",
-        "GB",
-        "DE",
-        "FR",
-        "IT",
-        "ES",
-        "NL",
-        "BE",
-        "CH",
-        "AT",
-        "SE",
-        "NO",
-        "DK",
-        "FI",
-        "RU",
-        "UA",
-        "PL",
-        "CZ",
-        "HU",
-        "RO",
-        "BG",
-        "GR",
-        "PT",
-        "IE",
-      ] as CountryCode[];
-
-      // Önce yaygın ülke kodlarını dene
-      for (const countryCode of commonCountryCodes) {
+      // 0 ile başlıyorsa ve 11 haneliyse (Türkiye numarası)
+      if (cleanNumber.startsWith("0") && cleanNumber.length === 11) {
+        const withTurkeyCode = "+90" + cleanNumber.substring(1);
         try {
-          // 0 ile başlıyorsa kaldır
-          const numberToTry = cleanNumber.startsWith("0")
-            ? cleanNumber.substring(1)
-            : cleanNumber;
-
-          const parsedNumber = parsePhoneNumber(numberToTry, countryCode);
+          const parsedNumber = parsePhoneNumber(withTurkeyCode);
           if (parsedNumber?.isValid()) {
-            console.log(
-              `Numara geçerli: ${parsedNumber.format("E.164")} (${countryCode})`
-            );
+            return parsedNumber.format("E.164");
+          }
+        } catch (e) {
+          // Parse hatasını yoksay
+        }
+      }
+
+      // 90 ile başlıyorsa ve 12 haneliyse (Türkiye numarası)
+      if (cleanNumber.startsWith("90") && cleanNumber.length === 12) {
+        const withPlusSign = "+" + cleanNumber;
+        try {
+          const parsedNumber = parsePhoneNumber(withPlusSign);
+          if (parsedNumber?.isValid()) {
+            return parsedNumber.format("E.164");
+          }
+        } catch (e) {
+          // Parse hatasını yoksay
+        }
+      }
+
+      // Diğer format denemeleri
+      const numberVariants = [
+        cleanNumber,
+        cleanNumber.startsWith("0") ? cleanNumber.substring(1) : cleanNumber,
+        cleanNumber.startsWith("90") ? cleanNumber.substring(2) : cleanNumber,
+        cleanNumber.startsWith("+90") ? cleanNumber.substring(3) : cleanNumber,
+      ];
+
+      for (const variant of numberVariants) {
+        try {
+          const parsedNumber = parsePhoneNumber(variant, "TR");
+          if (parsedNumber?.isValid()) {
             return parsedNumber.format("E.164");
           }
         } catch (e) {
           continue;
         }
-      }
-
-      // Direkt parse etmeyi dene
-      try {
-        // 0 ile başlıyorsa +90 ekle (Türkiye varsayılan)
-        if (cleanNumber.startsWith("0")) {
-          const withTurkeyCode = "+90" + cleanNumber.substring(1);
-          const parsedNumber = parsePhoneNumber(withTurkeyCode);
-          if (parsedNumber?.isValid()) {
-            return parsedNumber.format("E.164");
-          }
-        }
-
-        // Direkt numarayı parse etmeyi dene
-        const parsedNumber = parsePhoneNumber(cleanNumber);
-        if (parsedNumber?.isValid()) {
-          return parsedNumber.format("E.164");
-        }
-      } catch (e) {
-        // Parse hatalarını yok say
       }
 
       console.warn(`Geçerli telefon formatı bulunamadı: ${phoneNumber}`);
