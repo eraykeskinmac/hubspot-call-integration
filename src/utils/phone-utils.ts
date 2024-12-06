@@ -1,17 +1,12 @@
-// src/utils/phone-utils.ts
-
 import { parsePhoneNumber, CountryCode } from "libphonenumber-js";
 
 export class PhoneUtils {
   static formatInternationalNumber(phoneNumber: string): string | null {
     try {
-      // Numarayı temizle
       let cleanNumber = phoneNumber.replace(/[\s\(\)\-]/g, "");
 
-      // URL encoded içeriği decode et
       cleanNumber = decodeURIComponent(cleanNumber);
 
-      // + ile başlıyorsa direkt parse et
       if (cleanNumber.startsWith("+")) {
         const parsedNumber = parsePhoneNumber(cleanNumber);
         if (parsedNumber?.isValid()) {
@@ -19,7 +14,6 @@ export class PhoneUtils {
         }
       }
 
-      // 0 ile başlıyorsa ve 11 haneliyse (Türkiye numarası)
       if (cleanNumber.startsWith("0") && cleanNumber.length === 11) {
         const withTurkeyCode = "+90" + cleanNumber.substring(1);
         try {
@@ -28,11 +22,9 @@ export class PhoneUtils {
             return parsedNumber.format("E.164");
           }
         } catch (e) {
-          // Parse hatasını yoksay
         }
       }
 
-      // 90 ile başlıyorsa ve 12 haneliyse (Türkiye numarası)
       if (cleanNumber.startsWith("90") && cleanNumber.length === 12) {
         const withPlusSign = "+" + cleanNumber;
         try {

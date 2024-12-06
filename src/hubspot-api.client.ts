@@ -1,45 +1,26 @@
-// src/hubspot-api.ts
-
 import axios from "axios";
 import { config } from "./config";
+import { HubspotAssociationsHelper } from "./hubspot-associations.helper";
+import {
+  CallEngagementParams,
+  ErrorLog,
+  HubspotContact,
+} from "./types/hubspot.types";
 import { PhoneUtils } from "./utils/phone-utils";
-
-interface HubspotContact {
-  id: string;
-  properties: {
-    phone?: string;
-    mobilephone?: string;
-    firstname?: string;
-    lastname?: string;
-    company?: string;
-  };
-  associations?: {
-    companies?: {
-      results: Array<{
-        id: string;
-      }>;
-    };
-  };
-}
-
-interface ErrorLog {
-  timestamp: string;
-  error: string;
-  context: {
-    method: string;
-    params?: any;
-    response?: any;
-  };
-}
 
 export class HubspotApiClient {
   private readonly baseUrl: string;
   private readonly accessToken: string;
+  private readonly associationsHelper: HubspotAssociationsHelper;
   private errorLogs: ErrorLog[] = [];
 
   constructor(accessToken: string) {
     this.baseUrl = config.hubspotApiBaseUrl;
     this.accessToken = accessToken;
+    this.associationsHelper = new HubspotAssociationsHelper(
+      this.baseUrl,
+      this.accessToken
+    );
   }
 
   private logError(method: string, error: any, params?: any) {
@@ -119,6 +100,7 @@ export class HubspotApiClient {
               "lastname",
               "company",
             ],
+            associations: ["company"],
             limit: 1,
           },
           {
@@ -145,9 +127,6 @@ export class HubspotApiClient {
       return null;
     } catch (error) {
       this.logError("findContactByPhone", error, { phoneNumber });
-      if (axios.isAxiosError(error)) {
-        console.error("API Hatası:", error.response?.data);
-      }
       throw error;
     }
   }
@@ -180,7 +159,6 @@ export class HubspotApiClient {
       return response.data.total > 0;
     } catch (error) {
       this.logError("findCallByUUID", error, { callUuid });
-      console.error("Çağrı arama hatası:", error);
       return false;
     }
   }
@@ -201,26 +179,16 @@ export class HubspotApiClient {
     return statusMap[santralStatus] || "COMPLETED";
   }
 
-  async createCallEngagement(params: {
-    contactId?: string;
-    fromNumber: string;
-    toNumber: string;
-    callDuration: number;
-    recordingUrl: string;
-    callStatus: string;
-    callTimestamp: number;
-    callUuid: string;
-    notes?: string;
-  }) {
+  async createCallEngagement(params: CallEngagementParams) {
     try {
-      // Çağrı kontrolü
+      // Check for existing call
       const existingCall = await this.findCallByUUID(params.callUuid);
       if (existingCall) {
         console.log(`Bu çağrı zaten kaydedilmiş (UUID: ${params.callUuid})`);
         return { success: false, reason: "duplicate" };
       }
 
-      // Contact bilgilerini al
+      // Get contact and company info
       let contact = null;
       let companyInfo = null;
 
@@ -233,60 +201,47 @@ export class HubspotApiClient {
         }
       }
 
-      // Company bilgisini al
       if (contact?.associations?.companies?.results?.length > 0) {
         const companyId = contact.associations.companies.results[0].id;
-        const companyResponse = await axios.get(
-          `${this.baseUrl}/crm/v3/objects/companies/${companyId}`,
-          {
-            headers: {
-              Authorization: `Bearer ${this.accessToken}`,
-            },
-          }
-        );
-        companyInfo = {
-          companyId,
-          companyName: companyResponse.data.properties.name,
-        };
+        const companyResponse = await this.getCompanyById(companyId);
+        if (companyResponse) {
+          companyInfo = {
+            companyId,
+            companyName: companyResponse.properties.name,
+          };
+        }
       }
 
-      const contactName = contact
-        ? `${contact.properties.firstname || ""} ${
-            contact.properties.lastname || ""
-          }`.trim()
-        : params.toNumber;
-
-      const formattedFromNumber =
-        PhoneUtils.formatInternationalNumber(params.fromNumber) ||
-        params.fromNumber;
-      const formattedToNumber =
-        PhoneUtils.formatInternationalNumber(params.toNumber) ||
-        params.toNumber;
-
-      // Call kaydını oluştur
+      // Create call record
       const callData = {
         properties: {
           hs_call_direction: "INBOUND",
           hs_call_duration: params.callDuration,
-          hs_call_from_number: formattedFromNumber,
+          hs_call_from_number:
+            PhoneUtils.formatInternationalNumber(params.fromNumber) ||
+            params.fromNumber,
           hs_call_recording_url: params.recordingUrl,
           hs_call_status: this.mapCallStatus(params.callStatus),
-          hs_call_title: `Call with ${contactName} - Santral`,
-          hs_call_to_number: formattedToNumber,
+          hs_call_title: `Call with ${
+            contact ? this.getContactDisplayName(contact) : params.toNumber
+          } - Santral`,
+          hs_call_to_number:
+            PhoneUtils.formatInternationalNumber(params.toNumber) ||
+            params.toNumber,
           hs_timestamp: params.callTimestamp,
           hs_call_body:
             params.notes ||
             this.generateCallNote({
               ...params,
-              contactName,
+              contactName: contact
+                ? this.getContactDisplayName(contact)
+                : params.toNumber,
               companyName: companyInfo?.companyName,
-              fromNumber: formattedFromNumber,
-              toNumber: formattedToNumber,
             }),
         },
       };
 
-      // Çağrı kaydını oluştur
+      // Create call record
       const callResponse = await axios.post(
         `${this.baseUrl}/crm/v3/objects/calls`,
         callData,
@@ -301,24 +256,41 @@ export class HubspotApiClient {
       const callId = callResponse.data.id;
       console.log("✓ Çağrı kaydı oluşturuldu:", callId);
 
-      // İlişkilendirmeleri yap
-      if (contact) {
-        await this.associateCall(callId, contact.id);
-        console.log(`✓ Contact ile ilişkilendirildi: ${contactName}`);
-      }
+      // Create associations using the helper
+      if (contact || companyInfo) {
+        const associationResults =
+          await this.associationsHelper.createCallAssociations({
+            callId,
+            contactId: contact?.id,
+            companyId: companyInfo?.companyId,
+          });
 
-      if (companyInfo) {
-        await this.associateCallWithCompany(callId, companyInfo.companyId);
-        console.log(
-          `✓ Company ile ilişkilendirildi: ${companyInfo.companyName}`
-        );
+        if (
+          associationResults.contactAssociation?.status === "SUCCESS" &&
+          contact
+        ) {
+          console.log(
+            `✓ Contact ile ilişkilendirildi: ${this.getContactDisplayName(
+              contact
+            )}`
+          );
+        }
+
+        if (
+          associationResults.companyAssociation?.status === "SUCCESS" &&
+          companyInfo
+        ) {
+          console.log(
+            `✓ Company ile ilişkilendirildi: ${companyInfo.companyName}`
+          );
+        }
       }
 
       return {
         success: true,
         callId,
         contactId: contact?.id,
-        contactName,
+        contactName: contact ? this.getContactDisplayName(contact) : undefined,
         companyId: companyInfo?.companyId,
         companyName: companyInfo?.companyName,
       };
@@ -328,6 +300,29 @@ export class HubspotApiClient {
         callUuid: params.callUuid,
       });
       throw error;
+    }
+  }
+
+  private getContactDisplayName(contact: HubspotContact): string {
+    return `${contact.properties.firstname || ""} ${
+      contact.properties.lastname || ""
+    }`.trim();
+  }
+
+  private async getCompanyById(companyId: string) {
+    try {
+      const response = await axios.get(
+        `${this.baseUrl}/crm/v3/objects/companies/${companyId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.accessToken}`,
+          },
+        }
+      );
+      return response.data;
+    } catch (error) {
+      this.logError("getCompanyById", error, { companyId });
+      return null;
     }
   }
 
@@ -349,136 +344,36 @@ export class HubspotApiClient {
     }
   }
 
-  private generateCallNote(params: any): string {
-    const fromNumber = PhoneUtils.formatPhoneNumberForDisplay(
-      params.fromNumber
-    );
-    const toNumber = PhoneUtils.formatPhoneNumberForDisplay(params.toNumber);
-
+  private generateCallNote(params: {
+    callUuid: string;
+    fromNumber: string;
+    toNumber: string;
+    contactName: string;
+    companyName?: string;
+    callDuration: number;
+    callStatus: string;
+    recordingUrl?: string;
+    callTimestamp: number;
+  }): string {
     return `Santral Çağrı Detayları
 
 DETAYLAR
 --------
 • UUID: ${params.callUuid}
-• Arayan: ${fromNumber}
+• Arayan: ${params.fromNumber}
 • Aranan: ${params.contactName}${
       params.companyName ? ` (${params.companyName})` : ""
     }
-• Alıcı No: ${toNumber}
+• Alıcı No: ${params.toNumber}
 • Başlangıç: ${new Date(params.callTimestamp).toLocaleString()}
 • Süre: ${Math.floor(params.callDuration / 60)} dakika ${
       params.callDuration % 60
     } saniye
+• Durum: ${params.callStatus}
 ${
   params.recordingUrl
     ? `• Ses Kaydı: ${params.recordingUrl}`
     : "• Ses Kaydı Yok"
 }`;
-  }
-
-  async updateCallNotes(callUuid: string, notes: string): Promise<boolean> {
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}/crm/v3/objects/calls/search`,
-        {
-          filterGroups: [
-            {
-              filters: [
-                {
-                  propertyName: "hs_call_body",
-                  operator: "CONTAINS_TOKEN",
-                  value: callUuid,
-                },
-              ],
-            },
-          ],
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (response.data.total === 0) {
-        return false;
-      }
-
-      const callId = response.data.results[0].id;
-
-      await axios.patch(
-        `${this.baseUrl}/crm/v3/objects/calls/${callId}`,
-        {
-          properties: {
-            hs_call_body: notes,
-          },
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      return true;
-    } catch (error) {
-      this.logError("updateCallNotes", error, { callUuid });
-      console.error("Not güncelleme hatası:", error);
-      return false;
-    }
-  }
-
-  private async associateCall(callId: string, contactId: string) {
-    try {
-      const data = {
-        associationSpec: {
-          associationCategory: "HUBSPOT_DEFINED",
-          associationTypeId: 194, // Call to Contact association type
-        },
-      };
-
-      await axios.put(
-        `${this.baseUrl}/crm/v3/objects/calls/${callId}/associations/contacts/${contactId}`,
-        data,
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      console.log("✓ Call-Contact ilişkisi kuruldu");
-    } catch (error) {
-      this.logError("associateCall", error, { callId, contactId });
-      throw error;
-    }
-  }
-
-  private async associateCallWithCompany(callId: string, companyId: string) {
-    try {
-      const data = {
-        associationSpec: {
-          associationCategory: "HUBSPOT_DEFINED",
-          associationTypeId: 220, // Call to Company association type
-        },
-      };
-
-      await axios.put(
-        `${this.baseUrl}/crm/v3/objects/calls/${callId}/associations/companies/${companyId}`,
-        data,
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      console.log("✓ Call-Company ilişkisi kuruldu");
-    } catch (error) {
-      this.logError("associateCallWithCompany", error, { callId, companyId });
-      console.warn("Company ilişkilendirme hatası:", error);
-    }
   }
 }

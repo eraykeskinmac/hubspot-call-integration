@@ -1,5 +1,5 @@
 import CallApiClient from "./call-api";
-import { HubspotApiClient } from "./hubspot-api";
+import { HubspotApiClient } from "./hubspot-api.client";
 import { config } from "./config";
 
 interface CallRecord {
@@ -8,24 +8,11 @@ interface CallRecord {
   destination_number: string;
   start_stamp: string;
   duration: string;
+  talk_duration: string;
   result: string;
   recording_present: string;
   queue?: string;
   queue_wait_seconds?: string;
-}
-
-interface ApiResponse {
-  success: boolean;
-  data?: {
-    cdrs: CallRecord[];
-    pagination: {
-      page: number;
-      total_count: number;
-      total_pages: number;
-      limit: number;
-    };
-  };
-  error?: string;
 }
 
 interface SyncStats {
@@ -80,7 +67,15 @@ export class SantralHubspotSync {
     return this.stats;
   }
 
-  async syncCalls(startDate?: Date, endDate?: Date) {
+  async syncCalls(
+    startDate?: Date,
+    endDate?: Date,
+    options: {
+      limit?: number;
+      recording_present?: boolean;
+      direction?: "inbound" | "outbound" | "internal";
+    } = {}
+  ) {
     try {
       this.resetStats();
 
@@ -92,7 +87,9 @@ export class SantralHubspotSync {
       const callsResponse = await this.callApi.getCallRecords({
         start_stamp_from: startDate || defaultStartDate,
         start_stamp_to: endDate || new Date(),
-        limit: 100,
+        limit: options.limit || 100,
+        recording_present: options.recording_present,
+        direction: options.direction,
       });
 
       if (!callsResponse.success || !callsResponse.data) {
@@ -174,16 +171,6 @@ export class SantralHubspotSync {
       notes: callNote,
     });
 
-    if (result.success) {
-      console.log(`✓ Çağrı kaydı oluşturuldu (ID: ${result.callId})`);
-      if (result.contactId) {
-        console.log(`✓ Contact ile ilişkilendirildi: ${result.contactName}`);
-      }
-      if (result.companyId) {
-        console.log(`✓ Company ile ilişkilendirildi: ${result.companyName}`);
-      }
-    }
-
     return {
       success: result.success,
       contactMatched: !!result.contactId,
@@ -199,6 +186,7 @@ DETAYLAR
 • UUID: ${call.call_uuid}
 • Başlangıç: ${call.start_stamp}
 • Süre: ${call.duration}
+• Konuşma Süresi: ${call.talk_duration}
 • Durum: ${call.result}
 • Kuyruk: ${call.queue || "Yok"}
 • Bekleme Süresi: ${call.queue_wait_seconds || "0"} saniye
@@ -267,6 +255,63 @@ ${
     ).toFixed(2);
     console.log(`\nBaşarı Oranı: ${successRate}%`);
     console.log(`Eşleşme Oranı: ${matchRate}%`);
+  }
+
+  // Paging özelliği ile tüm çağrıları çekme
+  async syncAllCalls(
+    startDate?: Date,
+    endDate?: Date,
+    options: {
+      recording_present?: boolean;
+      direction?: "inbound" | "outbound" | "internal";
+    } = {}
+  ) {
+    try {
+      this.resetStats();
+      let page = 1;
+      let hasMore = true;
+
+      while (hasMore) {
+        const callsResponse = await this.callApi.getCallRecords({
+          start_stamp_from: startDate,
+          start_stamp_to: endDate,
+          recording_present: options.recording_present,
+          direction: options.direction,
+          limit: 100,
+          page: page,
+        });
+
+        if (!callsResponse.success || !callsResponse.data) {
+          throw new Error("Santral API hatası: " + callsResponse.error);
+        }
+
+        const { cdrs, pagination } = callsResponse.data;
+
+        // Çağrıları işle
+        for (const call of cdrs) {
+          try {
+            this.stats.processed++;
+            await this.processCall(call);
+          } catch (error) {
+            this.handleCallProcessError(call, error);
+          }
+        }
+
+        // Sonraki sayfa kontrolü
+        hasMore = pagination.page < pagination.total_pages;
+        page++;
+
+        console.log(
+          `Sayfa ${pagination.page}/${pagination.total_pages} işlendi`
+        );
+      }
+
+      this.printSyncSummary();
+      return { stats: this.stats };
+    } catch (error) {
+      console.error("Toplu senkronizasyon hatası:", error);
+      throw error;
+    }
   }
 }
 

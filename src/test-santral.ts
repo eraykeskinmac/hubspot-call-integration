@@ -1,33 +1,32 @@
-// src/test-santral.ts
-
-import SantralHubspotSync from "./santral-sync";
 import colors from "colors/safe";
+import SantralHubspotSync from "./santral-hubspot-sync";
 
 async function testSync() {
   try {
     console.log("\n" + "=".repeat(50));
-    console.log(colors.blue("🚀 Santral-Hubspot Detaylı Test Başlatılıyor\n"));
+    console.log(
+      colors.blue("🚀 Santral-Hubspot Senkronizasyon Testi Başlatılıyor\n")
+    );
     console.log("=".repeat(50) + "\n");
 
     const sync = new SantralHubspotSync();
 
-    // Test senaryoları
     const testCases = [
       {
         name: "Son 1 saat",
-        description: "Son 1 saatteki çağrıları test et",
+        description: "Son 1 saatteki çağrıları senkronize et",
         startDate: new Date(Date.now() - 60 * 60 * 1000),
         endDate: new Date(),
       },
       {
         name: "Son 24 saat",
-        description: "Son 24 saatteki çağrıları test et",
+        description: "Son 24 saatteki çağrıları senkronize et",
         startDate: new Date(Date.now() - 24 * 60 * 60 * 1000),
         endDate: new Date(),
       },
       {
-        name: "Özel aralık",
-        description: "Belirli bir tarih aralığını test et",
+        name: "Özel tarih aralığı",
+        description: "Belirli bir tarih aralığını senkronize et",
         startDate: new Date(Date.now() - 48 * 60 * 60 * 1000), // 48 saat önce
         endDate: new Date(Date.now() - 24 * 60 * 60 * 1000), // 24 saat önce
       },
@@ -96,7 +95,6 @@ async function testSync() {
     console.log(`• Başarısız: ${colors.red(stats.failed.toString())}`);
     console.log(`• Atlanan: ${colors.yellow(stats.skipped.toString())}`);
 
-    // Başarısız olan çağrıların detayları
     if (stats.errors.length > 0) {
       console.log(`\n${colors.red("❌ Hatalar:")}`);
       stats.errors.forEach((error, index) => {
