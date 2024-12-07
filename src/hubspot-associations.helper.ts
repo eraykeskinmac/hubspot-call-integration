@@ -198,16 +198,51 @@ export class HubspotAssociationsHelper {
     try {
       const results = await this.createBatchAssociations(associations);
 
+      // Daha güvenli kontroller ekleyelim
+      const contactAssociation = results?.find((result) => {
+        try {
+          return result?.inputs?.to?.id === params.contactId;
+        } catch (e) {
+          return false;
+        }
+      });
+
+      const companyAssociation = results?.find((result) => {
+        try {
+          return result?.inputs?.to?.id === params.companyId;
+        } catch (e) {
+          return false;
+        }
+      });
+
+      // Log results for debugging
+      console.log("Association results:", {
+        resultsLength: results?.length,
+        results: JSON.stringify(results, null, 2),
+        contactAssociation: contactAssociation ? "found" : "not found",
+        companyAssociation: companyAssociation ? "found" : "not found",
+      });
+
       return {
-        contactAssociation: results.find(
-          (r) => r.inputs.to.id === params.contactId
-        ),
-        companyAssociation: results.find(
-          (r) => r.inputs.to.id === params.companyId
-        ),
+        contactAssociation,
+        companyAssociation,
       };
     } catch (error) {
       console.error("Create call associations error:", error);
+
+      // Add more detailed error logging
+      if (error instanceof Error) {
+        console.error({
+          message: error.message,
+          stack: error.stack,
+          params: {
+            callId: params.callId,
+            contactId: params.contactId,
+            companyId: params.companyId,
+          },
+        });
+      }
+
       throw error;
     }
   }

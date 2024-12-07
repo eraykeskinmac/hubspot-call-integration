@@ -1,5 +1,6 @@
 // src/types/hubspot.types.ts
 
+// Contact interfaces
 export interface HubspotContact {
   id: string;
   properties: {
@@ -18,6 +19,7 @@ export interface HubspotContact {
   };
 }
 
+// Error logging interfaces
 export interface ErrorLog {
   timestamp: string;
   error: string;
@@ -28,6 +30,7 @@ export interface ErrorLog {
   };
 }
 
+// Association interfaces
 export interface AssociationInput {
   fromObjectType: string;
   toObjectType: string;
@@ -36,26 +39,23 @@ export interface AssociationInput {
   associationType: string;
 }
 
+export interface AssociationType {
+  associationCategory: "HUBSPOT_DEFINED" | "USER_DEFINED";
+  associationTypeId: number;
+}
+
 export interface AssociationRequest {
   from: {
     id: string;
+    type?: string;
   };
   to: {
     id: string;
+    type?: string;
   };
-  types?: Array<{
-    associationCategory: string;
-    associationTypeId: number;
-  }>;
+  types?: AssociationType[];
 }
 
-export interface BatchAssociationResult {
-  status: "SUCCESS" | "ERROR";
-  message?: string;
-  inputs: AssociationRequest;
-}
-
-// Default association request türü
 export interface DefaultAssociationRequest {
   from: {
     id: string;
@@ -69,8 +69,12 @@ export interface BatchAssociationResult {
   status: "SUCCESS" | "ERROR";
   message?: string;
   inputs: AssociationRequest;
+  result?: {
+    associationId?: string;
+  };
 }
 
+// Call engagement interfaces
 export interface CallEngagementParams {
   contactId?: string;
   fromNumber: string;
@@ -82,3 +86,21 @@ export interface CallEngagementParams {
   callUuid: string;
   notes?: string;
 }
+
+// Response interfaces
+export interface AssociationResponse {
+  results?: BatchAssociationResult[];
+  status?: string;
+  message?: string;
+}
+
+export interface CallAssociationResponse {
+  contactAssociation?: BatchAssociationResult;
+  companyAssociation?: BatchAssociationResult;
+}
+
+// Constants
+export const HUBSPOT_ASSOCIATION_TYPES = {
+  CALL_TO_CONTACT: 219,
+  CALL_TO_COMPANY: 220,
+} as const;
